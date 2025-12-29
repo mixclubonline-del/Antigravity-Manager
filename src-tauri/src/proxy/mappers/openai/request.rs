@@ -4,8 +4,13 @@ use serde_json::{json, Value};
 use super::streaming::get_thought_signature;
 
 pub fn transform_openai_request(request: &OpenAIRequest, project_id: &str, mapped_model: &str) -> Value {
+    // 将 OpenAI 工具转为 Value 数组以便探测
+    let tools_val = request.tools.as_ref().map(|list| {
+        list.iter().map(|v| v.clone()).collect::<Vec<_>>()
+    });
+
     // Resolve grounding config
-    let config = crate::proxy::mappers::common_utils::resolve_request_config(&request.model, mapped_model);
+    let config = crate::proxy::mappers::common_utils::resolve_request_config(&request.model, mapped_model, &tools_val);
 
     tracing::info!("[Debug] OpenAI Request: original='{}', mapped='{}', type='{}', has_image_config={}", 
         request.model, mapped_model, config.request_type, config.image_config.is_some());
@@ -130,11 +135,9 @@ pub fn transform_openai_request(request: &OpenAIRequest, project_id: &str, mappe
                         }
                     });
 
-                    // 注入 thoughtSignature (PR #93)
-                    if index == 0 {
-                        if let Some(ref sig) = global_thought_sig {
-                            func_call_part["thoughtSignature"] = json!(sig);
-                        }
+                    // [修复] 为该消息内的所有工具调用注入 thoughtSignature (PR #114 优化)
+                    if let Some(ref sig) = global_thought_sig {
+                        func_call_part["thoughtSignature"] = json!(sig);
                     }
 
                     parts.push(func_call_part);
@@ -197,6 +200,9 @@ pub fn transform_openai_request(request: &OpenAIRequest, project_id: &str, mappe
         ]
     });
 
+    // 深度清理 [undefined] 字符串 (Cherry Studio 等客户端常见注入)
+    crate::proxy::mappers::common_utils::deep_clean_undefined(&mut inner_request);
+
     // 4. Handle Tools (Merged Cleaning)
     if let Some(tools) = &request.tools {
         let mut function_declarations: Vec<Value> = Vec::new();
@@ -214,6 +220,11 @@ pub fn transform_openai_request(request: &OpenAIRequest, project_id: &str, mappe
             };
 
             if let Some(name) = gemini_func.get("name").and_then(|v| v.as_str()) {
+                // 跳过内置联网工具名称，避免重复定义
+                if name == "web_search" || name == "google_search" || name == "web_search_20250305" {
+                    continue;
+                }
+                
                 if name == "local_shell_call" {
                     if let Some(obj) = gemini_func.as_object_mut() {
                         obj.insert("name".to_string(), json!("shell"));

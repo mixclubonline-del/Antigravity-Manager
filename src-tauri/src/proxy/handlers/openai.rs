@@ -46,7 +46,11 @@ pub async fn handle_chat_completions(
             &*state.openai_mapping.read().await,
             &*state.anthropic_mapping.read().await,
         );
-        let config = crate::proxy::mappers::common_utils::resolve_request_config(&openai_req.model, &mapped_model);
+        // 将 OpenAI 工具转为 Value 数组以便探测联网
+        let tools_val: Option<Vec<Value>> = openai_req.tools.as_ref().map(|list| {
+            list.iter().cloned().collect()
+        });
+        let config = crate::proxy::mappers::common_utils::resolve_request_config(&openai_req.model, &mapped_model, &tools_val);
 
         // 3. 获取 Token (使用准确的 request_type)
         let (access_token, project_id, email) = match token_manager.get_token(&config.request_type, false).await {
@@ -355,7 +359,11 @@ pub async fn handle_completions(
             &*state.openai_mapping.read().await,
             &*state.anthropic_mapping.read().await,
         );
-        let config = crate::proxy::mappers::common_utils::resolve_request_config(&openai_req.model, &mapped_model);
+        // 将 OpenAI 工具转为 Value 数组以便探测联网
+        let tools_val: Option<Vec<Value>> = openai_req.tools.as_ref().map(|list| {
+            list.iter().cloned().collect()
+        });
+        let config = crate::proxy::mappers::common_utils::resolve_request_config(&openai_req.model, &mapped_model, &tools_val);
 
         let (access_token, project_id, email) = match token_manager.get_token(&config.request_type, false).await {
             Ok(t) => t,

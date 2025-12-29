@@ -1,5 +1,5 @@
 # Antigravity Tools 🚀
-
+> 专业的 AI 账号管理与协议反代系统 (v3.3.1)
 <div align="center">
   <img src="public/icon.png" alt="Antigravity Logo" width="120" height="120" style="border-radius: 24px; box-shadow: 0 10px 30px rgba(0,0,0,0.15);">
 
@@ -8,7 +8,7 @@
   
   <p>
     <a href="https://github.com/lbjlaq/Antigravity-Manager">
-      <img src="https://img.shields.io/badge/Version-3.3.0-blue?style=flat-square" alt="Version">
+      <img src="https://img.shields.io/badge/Version-3.3.1-blue?style=flat-square" alt="Version">
     </a>
     <img src="https://img.shields.io/badge/Tauri-v2-orange?style=flat-square" alt="Tauri">
     <img src="https://img.shields.io/badge/Backend-Rust-red?style=flat-square" alt="Rust">
@@ -174,6 +174,27 @@ print(response.choices[0].message.content)
 ## 📝 开发者与社区
 
 *   **版本演进 (Changelog)**:
+    *   **v3.3.1 (2025-12-28)**:
+        - **重大修复 (Critical Fixes)**:
+            - **Claude 协议 400 错误深度修复 (Claude Code 体验优化)**:
+                - **解决缓存控制冲突 (cache_control Fix)**: 彻底解决了在长上下文对话中，由于历史消息中包含 `cache_control` 标记或 `thought: true` 字段引发的上游校验报错。通过"历史消息去思考化"策略，完美绕过了 Google API 兼容层的解析 Bug，确保了长会话的稳定性。
+                - **深度 JSON Schema 清理引擎**: 优化了 MCP 工具定义的转换逻辑。现在会自动将 Google 不支持的复杂校验约束（如 `pattern`、`minLength`、`maximum` 等）迁移到描述字段中，既符合上游 Schema 规范，又保留了模型的语义提示。
+                - **协议头合规化**: 移除了系统指令中非标准的 `role`标记，并增强了对 `cache_control` 的显式过滤与拦截，确保生成的 Payload 达到最佳兼容性。
+            - **全协议内置联网工具适配**: 针对用户反馈，现在 **OpenAI、Gemini 和 Claude 协议** 均支持“无需模型后缀”即可触发联网。
+                - **联网探测兼容性增强**: 支持 `googleSearchRetrieval` 等新一代工具定义，并提供统一的 `googleSearch` 载荷标准化映射，确保 Cherry Studio 等客户端的联网开关能完美触发。
+                - **客户端脏数据自动净化**: 新增深度递归清洗逻辑，物理移除 Cherry Studio 等客户端在请求中注入的 `[undefined]` 无效属性，从根源解决 `400 INVALID_ARGUMENT` 报错。
+                - **高品质虚拟模型自动联网**: 进一步扩容高性能模型白名单（补全了 Claude 系列 Thinking 变体等），确保所有顶级模型均能享受原生的联网搜索回显体验。
+        - **核心优化与省流增强 (Optimization & Token Saving)**:
+            - **全链路追踪与闭环审计日志**:
+                - 为每个请求引入 6 位随机 **Trace ID**。
+                - 自动标记请求属性：`[USER]` 为真实对话，`[AUTO]` 为后台任务。
+                - 实现了流式/非流式响应的 **Token 消耗闭环回显**。
+            - **Claude CLI 后台任务智能“截胡” (Token Saver)**:
+                - **精准意图识别**: 新增对标题生成、摘要提取以及系统 Warmup/Reminder 等后台低价值请求的深度识别。
+                - **无感降级转发**: 自动将后台流量重定向至 **gemini-2.5-flash**，确保顶配模型（Sonnet/Opus）的额度仅用于核心对话。
+                - **显著节流**: 单次长会话预计可省下 1.7k - 17k+ 的高价值 Token。
+        - **稳定性增强**: 
+            - 修复了由于模型字段定义更新导致的 Rust 编译与测试用例报错，加固了数据模型层（models.rs）的鲁棒性。
     *   **v3.3.0 (2025-12-27)**:
         - **重大更新 (Major Updates)**:
             - **Codex CLI & Claude CLI 深度适配 (核心致谢 @llsenyue PR #93)**: 

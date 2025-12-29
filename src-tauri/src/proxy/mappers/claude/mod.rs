@@ -19,6 +19,7 @@ use std::pin::Pin;
 /// 创建从 Gemini SSE 流到 Claude SSE 流的转换
 pub fn create_claude_sse_stream(
     mut gemini_stream: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>,
+    trace_id: String,
 ) -> Pin<Box<dyn Stream<Item = Result<Bytes, String>> + Send>> {
     use async_stream::stream;
     use bytes::BytesMut;
@@ -40,7 +41,7 @@ pub fn create_claude_sse_stream(
                             let line = line_str.trim();
                             if line.is_empty() { continue; }
 
-                            if let Some(sse_chunks) = process_sse_line(line, &mut state) {
+                            if let Some(sse_chunks) = process_sse_line(line, &mut state, &trace_id) {
                                 for sse_chunk in sse_chunks {
                                     yield Ok(sse_chunk);
                                 }
@@ -63,7 +64,7 @@ pub fn create_claude_sse_stream(
 }
 
 /// 处理单行 SSE 数据
-fn process_sse_line(line: &str, state: &mut StreamingState) -> Option<Vec<Bytes>> {
+fn process_sse_line(line: &str, state: &mut StreamingState, trace_id: &str) -> Option<Vec<Bytes>> {
     if !line.starts_with("data: ") {
         return None;
     }
@@ -95,6 +96,27 @@ fn process_sse_line(line: &str, state: &mut StreamingState) -> Option<Vec<Bytes>
     // 发送 message_start
     if !state.message_start_sent {
         chunks.push(state.emit_message_start(raw_json));
+    }
+
+    // 捕获 groundingMetadata (Web Search)
+    if let Some(candidate) = raw_json.get("candidates").and_then(|c| c.get(0)) {
+        if let Some(grounding) = candidate.get("groundingMetadata") {
+            // 提取搜索词
+            if let Some(query) = grounding.get("webSearchQueries")
+                .and_then(|v| v.as_array())
+                .and_then(|arr| arr.get(0))
+                .and_then(|v| v.as_str())
+            {
+                state.web_search_query = Some(query.to_string());
+            }
+
+            // 提取结果块
+            if let Some(chunks_arr) = grounding.get("groundingChunks").and_then(|v| v.as_array()) {
+                state.grounding_chunks = Some(chunks_arr.clone());
+            } else if let Some(chunks_arr) = grounding.get("grounding_metadata").and_then(|m| m.get("groundingChunks")).and_then(|v| v.as_array()) {
+                state.grounding_chunks = Some(chunks_arr.clone());
+            }
+        }
     }
 
     // 处理所有 parts
@@ -134,6 +156,15 @@ fn process_sse_line(line: &str, state: &mut StreamingState) -> Option<Vec<Bytes>
         let usage = raw_json
             .get("usageMetadata")
             .and_then(|u| serde_json::from_value::<UsageMetadata>(u.clone()).ok());
+
+        if let Some(ref u) = usage {
+             tracing::info!(
+                 "[{}] Stream usage: In {}, Out {}", 
+                 trace_id, 
+                 u.prompt_token_count.unwrap_or(0), 
+                 u.candidates_token_count.unwrap_or(0)
+             );
+        }
 
         chunks.extend(state.emit_finish(Some(finish_reason), usage.as_ref()));
     }
@@ -288,8 +319,7 @@ mod tests {
     #[test]
     fn test_process_sse_line_done() {
         let mut state = StreamingState::new();
-        let result = process_sse_line("data: [DONE]", &mut state);
-
+        let result = process_sse_line("data: [DONE]", &mut state, "test_id");
         assert!(result.is_some());
         let chunks = result.unwrap();
         assert!(!chunks.is_empty());
@@ -306,8 +336,8 @@ mod tests {
         let mut state = StreamingState::new();
 
         let test_data = r#"data: {"candidates":[{"content":{"parts":[{"text":"Hello"}]}}],"usageMetadata":{},"modelVersion":"test","responseId":"123"}"#;
-
-        let result = process_sse_line(test_data, &mut state);
+        
+        let result = process_sse_line(test_data, &mut state, "test_id");
         assert!(result.is_some());
 
         let chunks = result.unwrap();

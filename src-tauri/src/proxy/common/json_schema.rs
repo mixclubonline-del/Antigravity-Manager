@@ -74,36 +74,27 @@ fn clean_json_schema_recursive(value: &mut Value) {
                 clean_json_schema_recursive(v);
             }
 
-            // 2. 收集并处理校验字段 (Soft-Remove with Type Check & Unwrapping)
+            // 2. 收集并处理校验字段 (Migration logic: 将约束降级为描述中的 Hint)
             let mut constraints = Vec::new();
             
-            // String 类型校验 (pattern): 必须是 String，否则可能是属性定义
-            let string_validations = [("pattern", "pattern")];
-            for (field, label) in string_validations {
-                if let Some(val) = map.remove(field) {
-                    if let Value::String(s) = val {
-                        constraints.push(format!("{}: {}", label, s));
-                    } else {
-                        // 不是 String (例如是 Object 类型的属性定义)，放回去
-                        map.insert(field.to_string(), val);
-                    }
-                }
-            }
-
-            // Number 类型校验
-            let number_validations = [
+            // 待迁移的约束黑名单
+            let validation_fields = [
+                ("pattern", "pattern"),
                 ("minLength", "minLen"), ("maxLength", "maxLen"),
                 ("minimum", "min"), ("maximum", "max"),
                 ("minItems", "minItems"), ("maxItems", "maxItems"),
                 ("exclusiveMinimum", "exclMin"), ("exclusiveMaximum", "exclMax"),
                 ("multipleOf", "multipleOf"),
+                ("format", "format"),
             ];
-            for (field, label) in number_validations {
+
+            for (field, label) in validation_fields {
                 if let Some(val) = map.remove(field) {
-                    if val.is_number() {
+                    // 仅当值是简单类型时才迁移（避免将对象定义的属性名误删，虽然由层级控制，但通过 Value 类型检查更稳妥）
+                    if val.is_string() || val.is_number() || val.is_boolean() {
                         constraints.push(format!("{}: {}", label, val));
                     } else {
-                        // 不是 Number，放回去
+                        // 如果不是预期类型，原样放回（可能是特殊属性定义）
                         map.insert(field.to_string(), val);
                     }
                 }
@@ -111,46 +102,47 @@ fn clean_json_schema_recursive(value: &mut Value) {
 
             // 3. 将约束信息追加到描述
             if !constraints.is_empty() {
-                let suffix = format!(" [Validation: {}]", constraints.join(", "));
-                let desc = map.entry("description".to_string()).or_insert_with(|| Value::String("".to_string()));
-                if let Value::String(s) = desc {
+                let suffix = format!(" [Constraint: {}]", constraints.join(", "));
+                let desc_val = map.entry("description".to_string()).or_insert_with(|| Value::String("".to_string()));
+                if let Value::String(s) = desc_val {
                     s.push_str(&suffix);
                 }
             }
 
-            // 4. 移除其他会干扰上游的非标准/冲突字段
-            let other_fields_to_remove = [
+            // 4. 彻底物理移除干扰生成的“硬项”黑色名单 (Hard Blacklist)
+            let hard_remove_fields = [
                 "$schema",
                 "additionalProperties",
                 "enumCaseInsensitive",
                 "enumNormalizeWhitespace",
                 "uniqueItems",
-                "format",
                 "default",
-                // MCP 工具常用但 Gemini 不支持的高级字段
-                "propertyNames",
                 "const",
+                "examples",
+                // MCP 工具常用但 Gemini 不支持的高级逻辑字段
+                "propertyNames",
                 "anyOf",
                 "oneOf",
                 "allOf",
                 "not",
-                "if",
-                "then",
-                "else",
+                "if", "then", "else",
+                "dependencies",
+                "dependentSchemas",
+                "dependentRequired",
+                "cache_control", // 解决用户提到的 cache_control 触发的 400 错误
             ];
-            for field in other_fields_to_remove {
+            for field in hard_remove_fields {
                 map.remove(field);
             }
 
-            // 5. 处理 type 字段 (Gemini Protobuf 不支持数组类型，强制降级)
+            // 5. 处理 type 字段 (Gemini 要求单字符串且小写)
             if let Some(type_val) = map.get_mut("type") {
                 match type_val {
                     Value::String(s) => {
                         *type_val = Value::String(s.to_lowercase());
                     }
                     Value::Array(arr) => {
-                        // Handle ["string", "null"] -> select first non-null string
-                        // 任何数组类型都必须降级为单一类型
+                        // 联合类型降级：取第一个非 null 类型
                         let mut selected_type = "string".to_string(); 
                         for item in arr {
                             if let Value::String(s) = item {

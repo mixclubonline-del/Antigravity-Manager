@@ -46,7 +46,20 @@ pub async fn handle_generate(
             &*state.openai_mapping.read().await,
             &*state.anthropic_mapping.read().await,
         );
-        let config = crate::proxy::mappers::common_utils::resolve_request_config(&model_name, &mapped_model);
+        // 提取 tools 列表以进行联网探测 (Gemini 风格可能是嵌套的)
+        let tools_val: Option<Vec<Value>> = body.get("tools").and_then(|t| t.as_array()).map(|arr| {
+            let mut flattened = Vec::new();
+            for tool_entry in arr {
+                if let Some(decls) = tool_entry.get("functionDeclarations").and_then(|v| v.as_array()) {
+                    flattened.extend(decls.iter().cloned());
+                } else {
+                    flattened.push(tool_entry.clone());
+                }
+            }
+            flattened
+        });
+
+        let config = crate::proxy::mappers::common_utils::resolve_request_config(&model_name, &mapped_model, &tools_val);
 
         // 4. 获取 Token (使用准确的 request_type)
         let (access_token, project_id, email) = match token_manager.get_token(&config.request_type, false).await {

@@ -26,6 +26,11 @@ pub async fn handle_messages(
     State(state): State<AppState>,
     Json(request): Json<ClaudeRequest>,
 ) -> Response {
+    // 生成随机 Trace ID 用户追踪
+    let trace_id: String = rand::Rng::sample_iter(rand::thread_rng(), &rand::distributions::Alphanumeric)
+        .take(6)
+        .map(char::from)
+        .collect::<String>().to_lowercase();
     // 获取最新一条“有意义”的消息内容（用于日志记录和后台任务检测）
     // 策略：反向遍历，首先筛选出所有角色为 "user" 的消息，然后从中找到第一条非 "Warmup" 且非空的文本消息
     // 获取最新一条“有意义”的消息内容（用于日志记录和后台任务检测）
@@ -72,7 +77,8 @@ pub async fn handle_messages(
         }).unwrap_or_else(|| "[No Messages]".to_string())
     });
     
-    crate::modules::logger::log_info(&format!("Received Claude request for model: {}, content_preview: {:.100}...", request.model, latest_msg));
+    
+    crate::modules::logger::log_info(&format!("[{}] Received Claude request for model: {}, content_preview: {:.100}...", trace_id, request.model, latest_msg));
 
     // 1. 获取 会话 ID (已废弃基于内容的哈希，改用 TokenManager 内部的时间窗口锁定)
     let session_id: Option<&str> = None;
@@ -98,7 +104,12 @@ pub async fn handle_messages(
             &*state.openai_mapping.read().await,
             &*state.anthropic_mapping.read().await,
         );
-        let config = crate::proxy::mappers::common_utils::resolve_request_config(&request_for_body.model, &mapped_model);
+        // 将 Claude 工具转为 Value 数组以便探测联网
+        let tools_val: Option<Vec<Value>> = request_for_body.tools.as_ref().map(|list| {
+            list.iter().map(|t| serde_json::to_value(t).unwrap_or(json!({}))).collect()
+        });
+
+        let config = crate::proxy::mappers::common_utils::resolve_request_config(&request_for_body.model, &mapped_model, &tools_val);
 
         // 4. 获取 Token (使用准确的 request_type)
         let (access_token, project_id, email) = match token_manager.get_token(&config.request_type, false).await {
@@ -119,21 +130,81 @@ pub async fn handle_messages(
 
         tracing::info!("Using account: {} for request (type: {})", email, config.request_type);
         
+        
         // --- 核心优化：智能识别与拦截后台自动请求 ---
+        // [DEBUG] 临时调试：打印原始消息以诊断提取失败
+        if let Some(last_msg) = request_for_body.messages.last() {
+            tracing::debug!("[{}] DEBUG - Last message role: {}, content type: {}", 
+                trace_id, 
+                last_msg.role,
+                match &last_msg.content {
+                    crate::proxy::mappers::claude::models::MessageContent::String(_) => "String",
+                    crate::proxy::mappers::claude::models::MessageContent::Array(_) => "Array",
+                }
+            );
+        }
+
+        // [FIX] 只扫描真正的"最后一条"用户消息，且必须过滤掉系统消息
+        // 关键：复用 meaningful_msg 的过滤逻辑，确保 Warmup/system-reminder 不会被当作用户请求
+        let last_user_msg = request_for_body.messages.iter().rev()
+            .filter(|m| m.role == "user")
+            .find_map(|m| {
+                let content = match &m.content {
+                    crate::proxy::mappers::claude::models::MessageContent::String(s) => s.to_string(),
+                    crate::proxy::mappers::claude::models::MessageContent::Array(arr) => {
+                        arr.iter()
+                            .filter_map(|block| match block {
+                                crate::proxy::mappers::claude::models::ContentBlock::Text { text } => Some(text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    }
+                };
+                
+                // 过滤规则：忽略系统消息
+                if content.trim().is_empty() 
+                    || content.starts_with("Warmup") 
+                    || content.contains("<system-reminder>") 
+                {
+                    None 
+                } else {
+                    Some(content)
+                }
+            })
+            .unwrap_or_default();
+
+        // [DEBUG] 打印提取结果
+        tracing::debug!("[{}] DEBUG - Extracted last_user_msg length: {}, preview: {:.100}", 
+            trace_id, 
+            last_user_msg.len(),
+            last_user_msg
+        );
+
         // 关键词识别：标题生成、摘要提取、下一步提示建议等
-        // [Optimization] 使用更长的预览窗口 (500 chars) 以捕获更具体的意图
-        let preview_msg = latest_msg.chars().take(500).collect::<String>();
-        let is_background_task = preview_msg.contains("write a 5-10 word title") 
-            || preview_msg.contains("Respond with the title")
-            || preview_msg.contains("Concise summary")
-            || preview_msg.contains("prompt suggestion generator");
+        // [Optimization] 增加长度限制：真实用户提问通常不会包含这些特殊指令，且后台任务通常极短
+        let preview_msg = last_user_msg.chars().take(500).collect::<String>();
+        
+        // [CRITICAL FIX] 强制识别系统消息为后台任务，防止它们消耗顶配额度
+        let is_system_message = preview_msg.starts_with("Warmup") 
+            || preview_msg.contains("<system-reminder>")
+            || preview_msg.contains("Caveat: The messages below were generated by the user while running local commands");
+        
+        let is_background_task = is_system_message || (
+            (preview_msg.contains("write a 5-10 word title") 
+                || preview_msg.contains("Respond with the title")
+                || preview_msg.contains("Concise summary")
+                || preview_msg.contains("prompt suggestion generator"))
+            && last_user_msg.len() < 800
+        ); // 额外保险：后台任务通常不超过 800 字符
 
         // 传递映射后的模型名
         let mut request_with_mapped = request_for_body.clone();
 
         if is_background_task {
              mapped_model = "gemini-2.5-flash".to_string();
-             tracing::info!("[AUTO] 检测到后台自动任务 ({}...)，已智能重定向到廉价节点: {}", 
+             tracing::info!("[{}][AUTO] 检测到后台任务 ({})，已重定向: {}", 
+                trace_id,
                 preview_msg,
                 mapped_model
              );
@@ -144,11 +215,13 @@ pub async fn handle_messages(
         } else {
              // [USER] 标记真实用户请求
              // [Optimization] 使用 WARN 级别高亮显示用户消息，防止被后台任务日志淹没
-             tracing::warn!("[USER] 检测到用户交互请求 ({}...)，保持原模型: {}", 
+             tracing::warn!("[{}][USER] 检测到用户交互请求 ({:.100})，保持原模型: {}", 
+                trace_id,
                 preview_msg,
                 mapped_model
              );
         }
+
         
         request_with_mapped.model = mapped_model;
 
@@ -198,7 +271,7 @@ pub async fn handle_messages(
             if request.stream {
                 let stream = response.bytes_stream();
                 let gemini_stream = Box::pin(stream);
-                let claude_stream = create_claude_sse_stream(gemini_stream);
+                let claude_stream = create_claude_sse_stream(gemini_stream, trace_id);
 
                 // 转换为 Bytes stream
                 let sse_stream = claude_stream.map(|result| -> Result<Bytes, std::io::Error> {
@@ -246,6 +319,15 @@ pub async fn handle_messages(
                     Ok(r) => r,
                     Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("Transform error: {}", e)).into_response(),
                 };
+
+                // [Optimization] 记录闭环日志：消耗情况
+                tracing::info!(
+                    "[{}] Request finished. Model: {}, Tokens: In {}, Out {}", 
+                    trace_id, 
+                    request_with_mapped.model, 
+                    claude_response.usage.input_tokens, 
+                    claude_response.usage.output_tokens
+                );
 
                 return Json(claude_response).into_response();
             }

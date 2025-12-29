@@ -43,6 +43,13 @@ impl NonStreamingProcessor {
             self.process_part(part);
         }
 
+        // 处理 grounding(web search) -> 转换为 server_tool_use / web_search_tool_result
+        if let Some(candidate) = gemini_response.candidates.as_ref().and_then(|c| c.get(0)) {
+            if let Some(grounding) = &candidate.grounding_metadata {
+                self.process_grounding(grounding);
+            }
+        }
+
         // 刷新剩余内容
         self.flush_thinking();
         self.flush_text();
@@ -52,6 +59,7 @@ impl NonStreamingProcessor {
             self.content_blocks.push(ContentBlock::Thinking {
                 thinking: String::new(),
                 signature: Some(signature),
+                cache_control: None,
             });
         }
 
@@ -73,6 +81,7 @@ impl NonStreamingProcessor {
                 self.content_blocks.push(ContentBlock::Thinking {
                     thinking: String::new(),
                     signature: Some(trailing_sig),
+                    cache_control: None,
                 });
             }
 
@@ -92,6 +101,7 @@ impl NonStreamingProcessor {
                 name: fc.name.clone(),
                 input: fc.args.clone().unwrap_or(serde_json::json!({})),
                 signature: None,
+                cache_control: None,
             };
 
             // 只使用 FC 自己的签名
@@ -115,6 +125,7 @@ impl NonStreamingProcessor {
                     self.content_blocks.push(ContentBlock::Thinking {
                         thinking: String::new(),
                         signature: Some(trailing_sig),
+                        cache_control: None,
                     });
                 }
 
@@ -140,6 +151,7 @@ impl NonStreamingProcessor {
                     self.content_blocks.push(ContentBlock::Thinking {
                         thinking: String::new(),
                         signature: Some(trailing_sig),
+                        cache_control: None,
                     });
                 }
 
@@ -151,6 +163,7 @@ impl NonStreamingProcessor {
                     self.content_blocks.push(ContentBlock::Thinking {
                         thinking: String::new(),
                         signature: Some(sig),
+                        cache_control: None,
                     });
                 }
             }
@@ -167,6 +180,46 @@ impl NonStreamingProcessor {
                 self.text_builder.push_str(&markdown_img);
                 self.flush_text();
             }
+        }
+    }
+
+    /// 处理 Grounding 元数据 (Web Search 结果)
+    fn process_grounding(&mut self, grounding: &serde_json::Value) {
+        let mut grounding_text = String::new();
+        
+        // 1. 处理搜索词
+        if let Some(queries) = grounding.get("webSearchQueries").and_then(|q| q.as_array()) {
+            let query_list: Vec<&str> = queries.iter().filter_map(|v| v.as_str()).collect();
+            if !query_list.is_empty() {
+                grounding_text.push_str("\n\n---\n**🔍 已为您搜索：** ");
+                grounding_text.push_str(&query_list.join(", "));
+            }
+        }
+
+        // 2. 处理来源链接 (Chunks)
+        let chunks = grounding.get("groundingChunks").or_else(|| grounding.get("grounding_metadata").and_then(|m| m.get("groundingChunks")));
+        if let Some(chunks_arr) = chunks.and_then(|v| v.as_array()) {
+            let mut links = Vec::new();
+            for (i, chunk) in chunks_arr.iter().enumerate() {
+                if let Some(web) = chunk.get("web") {
+                    let title = web.get("title").and_then(|v| v.as_str()).unwrap_or("网页来源");
+                    let uri = web.get("uri").and_then(|v| v.as_str()).unwrap_or("#");
+                    links.push(format!("[{}] [{}]({})", i + 1, title, uri));
+                }
+            }
+            
+            if !links.is_empty() {
+                grounding_text.push_str("\n\n**🌐 来源引文：**\n");
+                grounding_text.push_str(&links.join("\n"));
+            }
+        }
+
+        if !grounding_text.is_empty() {
+            // 在常规内容前后刷新并插入文本
+            self.flush_thinking();
+            self.flush_text();
+            self.text_builder.push_str(&grounding_text);
+            self.flush_text();
         }
     }
 
@@ -195,6 +248,7 @@ impl NonStreamingProcessor {
         self.content_blocks.push(ContentBlock::Thinking {
             thinking,
             signature,
+            cache_control: None,
         });
         self.thinking_builder.clear();
     }
@@ -222,6 +276,7 @@ impl NonStreamingProcessor {
             .unwrap_or(Usage {
                 input_tokens: 0,
                 output_tokens: 0,
+                server_tool_use: None,
             });
 
         ClaudeResponse {
@@ -337,6 +392,7 @@ mod tests {
             ContentBlock::Thinking {
                 thinking,
                 signature,
+                ..
             } => {
                 assert_eq!(thinking, "Let me think...");
                 assert_eq!(signature.as_deref(), Some("sig123"));

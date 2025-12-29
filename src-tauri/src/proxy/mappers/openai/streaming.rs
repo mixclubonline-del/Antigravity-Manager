@@ -6,7 +6,7 @@ use std::pin::Pin;
 use std::sync::{Mutex, OnceLock};
 use chrono::Utc;
 use uuid::Uuid;
-use tracing::{info, debug};
+use tracing::debug;
 use rand::Rng;
 
 // === 全局 ThoughtSignature 存储 ===
@@ -110,20 +110,11 @@ pub fn create_openai_sse_stream(
                                                 content_out.push_str(text);
                                             }
                                             // Capture thought (Thinking Models)
-                                            if let Some(thought) = part.get("thought").and_then(|t| t.as_bool()) {
-                                                // Currently gemini-2.0-flash-thinking-exp returns thought in "text" but with "thought": true metadata? 
-                                                // Or is it a separate part?
-                                                // The official docs say: parts: [{ text: "..." }, { thought: "..." }] for some; 
-                                                // but usually it's just text. However, experimental models might use a "thought" field.
-                                                // Let's check for "thought" string field first.
-                                            }
                                             if let Some(thought_text) = part.get("thought").and_then(|t| t.as_str()) {
                                                  content_out.push_str(thought_text);
                                             }
                                             // 捕获 thoughtSignature (Gemini 3 工具调用必需)
-                                            // 存储到全局状态，不再嵌入到用户可见的文本中
                                             if let Some(sig) = part.get("thoughtSignature").or(part.get("thought_signature")).and_then(|s| s.as_str()) {
-                                                tracing::info!("[OpenAI-SSE] 捕获 thoughtSignature (长度: {})", sig.len());
                                                 store_thought_signature(sig);
                                             }
 
@@ -131,17 +122,45 @@ pub fn create_openai_sse_stream(
                                                 let mime_type = img.get("mimeType").and_then(|v| v.as_str()).unwrap_or("image/png");
                                                 let data = img.get("data").and_then(|v| v.as_str()).unwrap_or("");
                                                 if !data.is_empty() {
-                                                    info!("[OpenAI-SSE] Detected image data: {} chars (base64)", data.len());
                                                     content_out.push_str(&format!("![image](data:{};base64,{})", mime_type, data));
                                                 }
                                             }
                                         }
                                     }
 
+                                    // 处理联网搜索引文 (Grounding Metadata) - 流式
+                                    if let Some(grounding) = candidate.and_then(|c| c.get("groundingMetadata")) {
+                                        let mut grounding_text = String::new();
+                                        if let Some(queries) = grounding.get("webSearchQueries").and_then(|q| q.as_array()) {
+                                            let query_list: Vec<&str> = queries.iter().filter_map(|v| v.as_str()).collect();
+                                            if !query_list.is_empty() {
+                                                grounding_text.push_str("\n\n---\n**🔍 已为您搜索：** ");
+                                                grounding_text.push_str(&query_list.join(", "));
+                                            }
+                                        }
+
+                                        if let Some(chunks) = grounding.get("groundingChunks").and_then(|c| c.as_array()) {
+                                            let mut links = Vec::new();
+                                            for (i, chunk) in chunks.iter().enumerate() {
+                                                if let Some(web) = chunk.get("web") {
+                                                    let title = web.get("title").and_then(|v| v.as_str()).unwrap_or("网页来源");
+                                                    let uri = web.get("uri").and_then(|v| v.as_str()).unwrap_or("#");
+                                                    links.push(format!("[{}] [{}]({})", i + 1, title, uri));
+                                                }
+                                            }
+                                            if !links.is_empty() {
+                                                grounding_text.push_str("\n\n**🌐 来源引文：**\n");
+                                                grounding_text.push_str(&links.join("\n"));
+                                            }
+                                        }
+                                        if !grounding_text.is_empty() {
+                                            content_out.push_str(&grounding_text);
+                                        }
+                                    }
+
                                     if content_out.is_empty() {
-                                        // Skip empty chunks if no text or image was found
-                                        // Unless it has a finish reason
-                                        if actual_data.get("candidates").and_then(|c| c.get(0)).and_then(|c| c.get("finishReason")).is_none() {
+                                        // Skip empty chunks if no text/grounding was found
+                                        if candidate.and_then(|c| c.get("finishReason")).is_none() {
                                             continue;
                                         }
                                     }

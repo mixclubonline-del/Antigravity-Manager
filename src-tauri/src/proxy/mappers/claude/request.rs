@@ -11,11 +11,17 @@ pub fn transform_claude_request_in(
     claude_req: &ClaudeRequest,
     project_id: &str,
 ) -> Result<Value, String> {
-    // 检测是否有 web_search 工具 (server tool)
+    // 检测是否有联网工具 (server tool or built-in tool)
     let has_web_search_tool = claude_req
         .tools
         .as_ref()
-        .map(|tools| tools.iter().any(|t| t.is_web_search()))
+        .map(|tools| {
+            tools.iter().any(|t| {
+                t.is_web_search() 
+                    || t.name.as_deref() == Some("google_search")
+                    || t.type_.as_deref() == Some("web_search_20250305")
+            })
+        })
         .unwrap_or(false);
 
     // 用于存储 tool_use id -> name 映射
@@ -24,19 +30,20 @@ pub fn transform_claude_request_in(
     // 1. System Instruction (注入动态身份防护)
     let system_instruction = build_system_instruction(&claude_req.system, &claude_req.model);
 
-    //  Map model name (decide grounding/thinking behavior)
+    //  Map model name (Use standard mapping)
     let mapped_model = if has_web_search_tool {
         "gemini-2.5-flash".to_string()
     } else {
         crate::proxy::common::model_mapping::map_claude_model_to_gemini(&claude_req.model)
     };
+    
+    // 将 Claude 工具转为 Value 数组以便探测联网
+    let tools_val: Option<Vec<Value>> = claude_req.tools.as_ref().map(|list| {
+        list.iter().map(|t| serde_json::to_value(t).unwrap_or(json!({}))).collect()
+    });
 
-    // Use shared grounding logic
-    let config = crate::proxy::mappers::common_utils::resolve_request_config(
-        &claude_req.model,
-        &mapped_model,
-    );
-
+    // Resolve grounding config
+    let config = crate::proxy::mappers::common_utils::resolve_request_config(&claude_req.model, &mapped_model, &tools_val);
     // Only Gemini models support our "dummy thought" workaround.
     // Claude models routed via Vertex/Google API often require valid thought signatures.
     let allow_dummy_thought = config.final_model.starts_with("gemini-");
@@ -76,6 +83,9 @@ pub fn transform_claude_request_in(
         "contents": contents,
         "safetySettings": safety_settings,
     });
+
+    // 深度清理 [undefined] 字符串 (Cherry Studio 等客户端常见注入)
+    crate::proxy::mappers::common_utils::deep_clean_undefined(&mut inner_request);
 
     if let Some(sys_inst) = system_instruction {
         inner_request["systemInstruction"] = sys_inst;
@@ -140,6 +150,7 @@ pub fn transform_claude_request_in(
         }
     }
 
+
     Ok(body)
 }
 
@@ -176,7 +187,6 @@ fn build_system_instruction(system: &Option<SystemPrompt>, model_name: &str) -> 
     parts.push(json!({"text": "\n--- [SYSTEM_PROMPT_END] ---"}));
 
     Some(json!({
-        "role": "user",
         "parts": parts
     }))
 }
@@ -189,6 +199,7 @@ fn build_contents(
     allow_dummy_thought: bool,
 ) -> Result<Value, String> {
     let mut contents = Vec::new();
+    let mut last_thought_signature: Option<String> = None;
 
     let msg_count = messages.len();
     for (i, msg) in messages.iter().enumerate() {
@@ -216,15 +227,15 @@ fn build_contents(
                                 parts.push(json!({"text": text}));
                             }
                         }
-                        ContentBlock::Thinking {
-                            thinking,
-                            signature,
-                        } => {
+                        ContentBlock::Thinking { thinking, signature, .. } => {
                             let mut part = json!({
                                 "text": thinking,
-                                "thought": true
                             });
+                            // [New] 递归清理黑名单字段（如 cache_control）
+                            crate::proxy::common::json_schema::clean_json_schema(&mut part);
+
                             if let Some(sig) = signature {
+                                last_thought_signature = Some(sig.clone());
                                 part["thoughtSignature"] = json!(sig);
                             }
                             parts.push(part);
@@ -239,12 +250,7 @@ fn build_contents(
                                 }));
                             }
                         }
-                        ContentBlock::ToolUse {
-                            id,
-                            name,
-                            input,
-                            signature,
-                        } => {
+                        ContentBlock::ToolUse { id, name, input, signature, .. } => {
                             let mut part = json!({
                                 "functionCall": {
                                     "name": name,
@@ -252,19 +258,26 @@ fn build_contents(
                                     "id": id
                                 }
                             });
+                            
+                            // [New] 递归清理参数中可能存在的非法校验字段
+                            crate::proxy::common::json_schema::clean_json_schema(&mut part);
 
                             // 存储 id -> name 映射
                             tool_id_to_name.insert(id.clone(), name.clone());
 
-                            // Use client signature if provided, otherwise fallback to global store (Gemini 3 thinking mode fix)
-                            let final_sig = signature.clone().or_else(|| {
-                                let global_sig = get_thought_signature();
-                                if global_sig.is_some() {
-                                    tracing::info!("[Claude-Request] Using global thought_signature fallback (length: {})", 
-                                        global_sig.as_ref().unwrap().len());
-                                }
-                                global_sig
-                            });
+                            // Signature resolution logic (Priority: Client -> Context -> Global Store)
+                            let final_sig = signature.as_ref()
+                                .or(last_thought_signature.as_ref())
+                                .cloned()
+                                .or_else(|| {
+                                    let global_sig = get_thought_signature();
+                                    if global_sig.is_some() {
+                                        tracing::info!("[Claude-Request] Using global thought_signature fallback (length: {})", 
+                                            global_sig.as_ref().unwrap().len());
+                                    }
+                                    global_sig
+                                });
+
                             if let Some(sig) = final_sig {
                                 part["thoughtSignature"] = json!(sig);
                             }
@@ -311,17 +324,26 @@ fn build_contents(
                                 }
                             }
 
-                            parts.push(json!({
+                            let mut part = json!({
                                 "functionResponse": {
                                     "name": func_name,
                                     "response": {"result": merged_content},
                                     "id": tool_use_id
                                 }
-                            }));
+                            });
+
+                            // [修复] Tool Result 也需要回填签名（如果上下文中有）
+                            if let Some(sig) = last_thought_signature.as_ref() {
+                                part["thoughtSignature"] = json!(sig);
+                            }
+
+                            parts.push(part);
+                        }
+                        ContentBlock::ServerToolUse { .. } | ContentBlock::WebSearchToolResult { .. } => {
+                            // 搜索结果 block 不应由客户端发回给上游 (已由 tool_result 替代)
+                            continue;
                         }
                         ContentBlock::RedactedThinking { data } => {
-                            // Gemini doesn't have a direct equivalent for redacted thinking,
-                            // treat it as a special thought part
                             parts.push(json!({
                                 "text": format!("[Redacted Thinking: {}]", data),
                                 "thought": true
@@ -334,7 +356,6 @@ fn build_contents(
 
         // Fix for "Thinking enabled, assistant message must start with thinking block" 400 error
         // ONLY apply this for the LAST assistant message (Pre-fill scenario)
-        // Historical assistant messages MUST NOT have dummy thinking blocks without signatures
         if allow_dummy_thought && role == "model" && is_thinking_enabled && i == msg_count - 1 {
             let has_thought_part = parts
                 .iter()
@@ -368,48 +389,60 @@ fn build_contents(
 /// 构建 Tools
 fn build_tools(tools: &Option<Vec<Tool>>, has_web_search: bool) -> Result<Option<Value>, String> {
     if let Some(tools_list) = tools {
-        if has_web_search {
-            // Web Search 工具映射
-            return Ok(Some(json!([{
-                "googleSearch": {
-                    "enhancedContent": {
-                        "imageSearch": {
-                            "maxResultCount": 5
-                        }
-                    }
-                }
-            }])));
-        }
+        let mut function_declarations: Vec<Value> = Vec::new();
+        let mut has_google_search = has_web_search;
 
-        // 普通工具 (skip server tools like web_search)
-        let mut function_declarations = Vec::new();
         for tool in tools_list {
-            // Skip server tools - they are handled separately
+            // 1. Detect server tools / built-in tools like web_search
             if tool.is_web_search() {
+                has_google_search = true;
                 continue;
             }
 
-            // Client tools require input_schema
-            let schema = match &tool.input_schema {
-                Some(s) => s.clone(),
-                None => continue, // Skip tools without schema
-            };
+            if let Some(t_type) = &tool.type_ {
+                if t_type == "web_search_20250305" {
+                    has_google_search = true;
+                    continue;
+                }
+            }
 
-            let mut input_schema = serde_json::to_value(&schema).unwrap_or(json!({}));
-            crate::proxy::common::json_schema::clean_json_schema(&mut input_schema);
+            // 2. Detect by name
+            if let Some(name) = &tool.name {
+                if name == "web_search" || name == "google_search" {
+                    has_google_search = true;
+                    continue;
+                }
 
-            let tool_decl = json!({
-                "name": tool.get_name(),
-                "description": tool.description,
-                "parameters": input_schema
-            });
-            function_declarations.push(tool_decl);
+                // 3. Client tools require input_schema
+                let mut input_schema = tool.input_schema.clone().unwrap_or(json!({
+                    "type": "object",
+                    "properties": {}
+                }));
+                crate::proxy::common::json_schema::clean_json_schema(&mut input_schema);
+
+                function_declarations.push(json!({
+                    "name": name,
+                    "description": tool.description,
+                    "parameters": input_schema
+                }));
+            }
         }
 
+        let mut tool_obj = serde_json::Map::new();
+
+        // [修复] 解决 "Multiple tools are supported only when they are all search tools" 400 错误
+        // 原理：Gemini v1internal 接口非常挑剔，通常不允许在同一个工具定义中混用 Google Search 和 Function Declarationsc。
+        // 对于 Claude CLI 等携带 MCP 工具的客户端，必须优先保证 Function Declarations 正常工作。
         if !function_declarations.is_empty() {
-            return Ok(Some(json!([{
-                "functionDeclarations": function_declarations
-            }])));
+            // 如果有本地工具，则只使用本地工具，放弃注入的 Google Search
+            tool_obj.insert("functionDeclarations".to_string(), json!(function_declarations));
+        } else if has_google_search {
+            // 只有在没有本地工具时，才允许注入 Google Search
+            tool_obj.insert("googleSearch".to_string(), json!({}));
+        }
+
+        if !tool_obj.is_empty() {
+            return Ok(Some(json!([tool_obj])));
         }
     }
 
@@ -558,12 +591,12 @@ mod tests {
                 },
                 Message {
                     role: "assistant".to_string(),
-                    content: MessageContent::Array(vec![ContentBlock::ToolUse {
-                        id: "call_1".to_string(),
-                        name: "run_command".to_string(),
-                        input: json!({"command": "ls"}),
-                        signature: None,
-                    }]),
+                        ContentBlock::ToolUse {
+                            id: "call_1".to_string(),
+                            name: "run_command".to_string(),
+                            input: json!({"command": "ls"}),
+                            signature: None,
+                        }
                 },
                 Message {
                     role: "user".to_string(),

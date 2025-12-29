@@ -1,4 +1,5 @@
 # Antigravity Tools 🚀
+> Professional AI Account Management & Proxy System (v3.3.1)
 
 <div align="center">
   <img src="public/icon.png" alt="Antigravity Logo" width="120" height="120" style="border-radius: 24px; box-shadow: 0 10px 30px rgba(0,0,0,0.15);">
@@ -8,7 +9,7 @@
   
   <p>
     <a href="https://github.com/lbjlaq/Antigravity-Manager">
-      <img src="https://img.shields.io/badge/Version-3.3.0-blue?style=flat-square" alt="Version">
+      <img src="https://img.shields.io/badge/Version-3.3.1-blue?style=flat-square" alt="Version">
     </a>
     <img src="https://img.shields.io/badge/Tauri-v2-orange?style=flat-square" alt="Tauri">
     <img src="https://img.shields.io/badge/Backend-Rust-red?style=flat-square" alt="Rust">
@@ -43,7 +44,7 @@ By leveraging this app, you can transform common Web Sessions (Google/Anthropic)
 *   **Smart Recommendation**: The system uses a real-time algorithm to filter and recommend the "Best Account" based on quota redundancy, supporting **one-click switching**.
 *   **Active Account Snapshot**: Visually displays the specific quota percentage and the last synchronization time of the currently active account.
 
-### 2. 🔐 Powerful Account Manager
+### 2. 🔐 Professional AI Account Management & Proxy System (v3.3.1)
 *   **OAuth 2.0 Authorization (Auto/Manual)**: Pre-generates a copyable authorization URL so you can finish auth in any browser; after the callback, the app auto-completes and saves the account (use “I already authorized, continue” if needed).
 *   **Multi-dimensional Import**: Supports single token entry, JSON batch import, and automatic hot migration from V1 legacy databases.
 *   **Gateway-level Views**: Supports switching between "List" and "Grid" views. Provides 403 Forbidden detection, automatically marking and skipping accounts with permission anomalies.
@@ -157,6 +158,27 @@ print(response.choices[0].message.content)
 
 ## 📝 Developer & Community
 
+    *   **v3.3.1 (2025-12-28)**:
+        - **Critical Fixes**:
+            - **Deep Fix for Claude Protocol 400 Errors (Claude Code Optimization)**:
+                - **Resolved Cache Control Conflicts (cache_control Fix)**: Fully address the upstream validation errors caused by `cache_control` tags or `thought: true` fields in historical messages. Optimized with a "historical message de-thinking" strategy to bypass parsing bugs in the Google API compatibility layer.
+                - **Deep JSON Schema Cleaning Engine**: Optimized the conversion of MCP tool definitions. Complex validation constraints unsupported by Google (e.g., `pattern`, `minLength`, `maximum`) are now automatically migrated to description fields, ensuring compliance while preserving semantic hints.
+                - **Protocol Header Compliance**: Removed non-standard `role` tags from system instructions and enhanced explicit filtering for `cache_control` to guarantee maximum payload compatibility.
+            - **Enhanced Connectivity & Web Search Compatibility**: 
+                - **Search Compatibility**: Added support for `googleSearchRetrieval` and other next-gen tool definitions. Now provides standardized `googleSearch` payload mapping, ensuring seamless integration with Cherry Studio's built-in search toggle.
+                - **Automated Client Data Purification**: Introduced deep recursive cleaning to physically strip `[undefined]` properties injected by clients like Cherry Studio, resolving `400 INVALID_ARGUMENT` errors at the source.
+                - **High-Quality Virtual Model Auto-Networking**: Expanded the high-performance model whitelist (including Claude Thinking variants), ensuring all premium models trigger native networking search by default.
+        - **Optimization & Token Saving**:
+            - **Full-link Tracing & Closed-loop Audit Logs**:
+                - Introduced a 6-character random **Trace ID** for every request.
+                - Automated request tagging: `[USER]` for real conversations, `[AUTO]` for background tasks.
+                - Implemented **token consumption reporting** for both streaming and non-streaming responses.
+            - **Claude CLI Background Task "Token Saver"**:
+                - **Intelligent Intent Recognition**: Enhanced detection for low-value requests like title generation, summaries, and system Warmups/Reminders.
+                - **Seamless Downgrade Redirect**: Automatically routes background traffic to **gemini-2.5-flash**, ensuring top-tier model (Sonnet/Opus) quotas are reserved for core tasks.
+                - **Significant Token Saving**: Saves 1.7k - 17k+ high-value tokens per long session.
+        - **Stability Enhancements**: 
+            - Resolved Rust compilation and test case errors caused by the latest model field updates, hardening the data model layer (models.rs).
     *   **v3.3.0 (2025-12-27)**:
         - **Major Updates**:
             - **Deep Adaptation for Codex CLI & Claude CLI (Core Thanks to @llsenyue PR #93)**:

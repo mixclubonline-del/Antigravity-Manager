@@ -50,6 +50,8 @@ pub struct StreamingState {
     used_tool: bool,
     signatures: SignatureManager,
     trailing_signature: Option<String>,
+    pub web_search_query: Option<String>,
+    pub grounding_chunks: Option<Vec<serde_json::Value>>,
 }
 
 impl StreamingState {
@@ -62,6 +64,8 @@ impl StreamingState {
             used_tool: false,
             signatures: SignatureManager::new(),
             trailing_signature: None,
+            web_search_query: None,
+            grounding_chunks: None,
         }
     }
 
@@ -221,6 +225,48 @@ impl StreamingState {
             self.block_index += 1;
         }
 
+        // 处理 grounding(web search) -> 转换为 Markdown 文本块
+        if self.web_search_query.is_some() || self.grounding_chunks.is_some() {
+            let mut grounding_text = String::new();
+            
+            // 1. 处理搜索词
+            if let Some(query) = &self.web_search_query {
+                if !query.is_empty() {
+                    grounding_text.push_str("\n\n---\n**🔍 已为您搜索：** ");
+                    grounding_text.push_str(query);
+                }
+            }
+
+            // 2. 处理来源链接
+            if let Some(chunks) = &self.grounding_chunks {
+                let mut links = Vec::new();
+                for (i, chunk) in chunks.iter().enumerate() {
+                    if let Some(web) = chunk.get("web") {
+                        let title = web.get("title").and_then(|v| v.as_str()).unwrap_or("网页来源");
+                        let uri = web.get("uri").and_then(|v| v.as_str()).unwrap_or("#");
+                        links.push(format!("[{}] [{}]({})", i + 1, title, uri));
+                    }
+                }
+                
+                if !links.is_empty() {
+                    grounding_text.push_str("\n\n**🌐 来源引文：**\n");
+                    grounding_text.push_str(&links.join("\n"));
+                }
+            }
+
+            if !grounding_text.is_empty() {
+                // 发送一个新的 text 块
+                chunks.push(self.emit("content_block_start", json!({
+                    "type": "content_block_start",
+                    "index": self.block_index,
+                    "content_block": { "type": "text", "text": "" }
+                })));
+                chunks.push(self.emit_delta("text_delta", json!({ "text": grounding_text })));
+                chunks.push(self.emit("content_block_stop", json!({ "type": "content_block_stop", "index": self.block_index })));
+                self.block_index += 1;
+            }
+        }
+
         // 确定 stop_reason
         let stop_reason = if self.used_tool {
             "tool_use"
@@ -230,10 +276,13 @@ impl StreamingState {
             "end_turn"
         };
 
-        let usage = usage_metadata.map(|u| to_claude_usage(u)).unwrap_or(Usage {
-            input_tokens: 0,
-            output_tokens: 0,
-        });
+        let usage = usage_metadata
+            .map(|u| to_claude_usage(u))
+            .unwrap_or(Usage {
+                input_tokens: 0,
+                output_tokens: 0,
+                server_tool_use: None,
+            });
 
         chunks.push(self.emit(
             "message_delta",

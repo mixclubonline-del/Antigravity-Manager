@@ -278,7 +278,8 @@ impl TokenManager {
                                 .await;
                             self.tokens.remove(&token.account_id);
                         }
-                        last_error = Some(format!("Token refresh failed for {}: {}", token.email, e));
+                        // Avoid leaking account emails to API clients; details are still in logs.
+                        last_error = Some(format!("Token refresh failed: {}", e));
                         attempted.insert(token.account_id.clone());
 
                         // 如果当前账号被锁定复用，刷新失败后必须解除锁定，避免下一次仍选中同一账号

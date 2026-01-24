@@ -5,6 +5,7 @@ import Dashboard from './pages/Dashboard';
 import Accounts from './pages/Accounts';
 import Settings from './pages/Settings';
 import ApiProxy from './pages/ApiProxy';
+import Projects from './pages/Projects';
 import Monitor from './pages/Monitor';
 import ThemeManager from './components/common/ThemeManager';
 import { useEffect } from 'react';
@@ -33,6 +34,10 @@ const router = createBrowserRouter([
       {
         path: 'monitor',
         element: <Monitor />,
+      },
+      {
+        path: 'projects',
+        element: <Projects />,
       },
       {
         path: 'settings',

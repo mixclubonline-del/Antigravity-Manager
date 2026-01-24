@@ -12,6 +12,7 @@ function Navbar() {
         { path: '/', label: t('nav.dashboard') },
         { path: '/accounts', label: t('nav.accounts') },
         { path: '/api-proxy', label: t('nav.proxy') },
+        { path: '/projects', label: 'Projects' },
         { path: '/settings', label: t('nav.settings') },
     ];
 

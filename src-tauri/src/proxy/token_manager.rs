@@ -511,6 +511,29 @@ impl TokenManager {
         self.tokens.len()
     }
     
+    /// List all accounts with basic info for external API
+    /// Returns: Vec<(account_id, email, is_rate_limited, rate_limit_reset_seconds)>
+    pub fn list_accounts(&self) -> Vec<(String, String, bool, Option<u64>)> {
+        self.tokens
+            .iter()
+            .map(|entry| {
+                let token = entry.value();
+                let is_limited = self.is_rate_limited(&token.account_id);
+                let reset_seconds = if is_limited {
+                    self.rate_limit_tracker.get_reset_seconds(&token.account_id)
+                } else {
+                    None
+                };
+                (
+                    token.account_id.clone(),
+                    token.email.clone(),
+                    is_limited,
+                    reset_seconds,
+                )
+            })
+            .collect()
+    }
+    
     // ===== 限流管理方法 =====
     
     /// 标记账号限流(从外部调用,通常在 handler 中)

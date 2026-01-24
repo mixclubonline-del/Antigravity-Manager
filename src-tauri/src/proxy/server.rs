@@ -193,7 +193,13 @@ impl AxumServer {
             .route("/v1/api/event_logging/batch", post(silent_ok_handler))
             .route("/v1/api/event_logging", post(silent_ok_handler))
             .route("/healthz", get(health_check_handler))
+            // External API endpoints for client integrations (e.g., MixxOS)
+            .route("/api/accounts", get(handlers::api::handle_get_accounts))
+            .route("/api/stats", get(handlers::api::handle_get_stats))
+            .route("/api/status", get(handlers::api::handle_get_status))
+            .route("/api/logs", get(handlers::api::handle_get_logs))
             .layer(DefaultBodyLimit::max(100 * 1024 * 1024))
+
             .layer(axum::middleware::from_fn_with_state(state.clone(), crate::proxy::middleware::monitor::monitor_middleware))
             .layer(TraceLayer::new_for_http())
             .layer(axum::middleware::from_fn_with_state(
